@@ -1,0 +1,655 @@
+---
+title: "Final_Project"
+author: "Tommy Barron, April Chia, Taylor Kirk"
+date: "2024-07-30"
+output: pdf_document
+---
+
+```{r setup, include = FALSE}
+library(formatR)
+knitr::opts_chunk$set(echo = TRUE, tidy.opts = list(width.cutoff = 85), tidy = FALSE)
+```
+
+```{r, message=FALSE, comment=NA, warning=FALSE}
+# Importing libraries
+
+library(readr)
+library(ggplot2)
+library(summarytools)
+library(psych)
+library(stringr)
+library(dplyr)
+library(corrplot)
+library(caret)
+library(pscl)
+library(pROC)
+library(PRROC)
+```
+
+# Data Importing and Pre-processing ---------------------------
+
+```{r, message=FALSE, comment=NA}
+# Importing dataset
+
+df <- read_csv("online_shoppers_intention.csv")
+```
+
+```{r, message=FALSE, comment=NA}
+# Dataset characteristics
+
+dim(df)
+str(df)
+```
+The dataset contains 18 columns and 12,330 rows. We used the str() function to display the structure of each column.
+
+```{r, message=FALSE, comment=NA}
+# Determining the number of duplicate rows
+
+df_dup <- df[duplicated(df), ]
+dim(df_dup)
+```
+
+```{r, message=FALSE, comment=NA}
+# Removing duplicate rows to reduce redundant data
+
+df <- df[!duplicated(df), ]
+```
+
+It was determined that there were 121 duplicate rows. It is unlikely to have identical rows across all columns, so it could be an input error. We decided to remove those rows to reduce the chance of overfitting.
+
+```{r, message=FALSE, comment=NA}
+# Finding missing values
+
+na_counts <- sapply(df, function(x) sum(is.na(x)))
+na_counts
+```
+
+We used the sapply() function over the dataframe (df) which returns a frequency table of how many missing values are in each column. The results showed that the Informational, Page Values, and Operating Systems columns have 128, 135, and 123 missing values, respectively.
+
+## Handling missing values (Informational)
+
+```{r, message=FALSE, comment=NA}
+# Informational column without the 0's
+
+info_nzero <- subset.data.frame(df[df$Informational > 0, ])
+
+# Probability table for unique values
+
+probability <- table(info_nzero$Informational, useNA = "no")
+prob_table <- prop.table(probability)  
+
+# Function to randomly impute one of those values based on their proportion
+
+random_impute <- function(values, prob_table, size) {
+  sample(values, size, replace = T, prob = prob_table)
+}
+
+# Separating the NA Information rows from the ones where InformationDuration is greater 
+# than 0, and the ones where it's less than or equal to 0
+
+na_indices <- which(is.na(df$Informational))
+na_indices_great_zero <- na_indices[df[na_indices, "Informational_Duration"] > 0]
+na_indices_zero_or_less <- na_indices[df[na_indices, "Informational_Duration"] <= 0]
+
+# Converting the probability table of unique values to numeric
+
+unique_values <- as.numeric(names(prob_table))
+probs <- as.numeric(prob_table)
+
+# Applying the function to the full data set to randomly convert the NA value in the 
+# Information column to one of it's unique values according to their proportion if 
+# the corresponding Informational Duration Column is greater than 0
+
+# Viewing the remaining NA values
+df$Informational[na_indices_great_zero] <- random_impute(unique_values,
+                                                         probs,
+                                                         length(na_indices_great_zero))
+
+
+# Converting the remaining NA values to 0
+
+df$Informational[is.na(df$Informational)] <- 0
+```
+
+The Informational column is an integer value that represents the number of pages a customer visited that matched the information category within that session. The next field of Informational Duration is a numeric value representing how long the customer spent on that page. Given that information, the information column would only be an integer greater than 0 if the corresponding Informational Duration field was greater than 0. Therefore, it was decided that the best way to manage the 128 missing values in the Informational column was to impute them according to their proportion among the known values (if the corresponding Information Duration field was greater than 0), and then the remaining missing values were converted to 0's.
+
+## Handling missing values (PageValues)
+
+```{r, message=FALSE, comment=NA}
+# Subsetting the PageValues NA values
+
+pv_na <- df[!is.na(df$PageValues), ]
+
+# Separate PageValues if Administrative, Information, or ProductRelated columns 
+# are greater than 0
+
+pv_na <- pv_na[pv_na$Administrative > 0 |  
+               pv_na$Informational > 0 |  
+               pv_na$ProductRelated > 0, ]
+summary(pv_na$PageValues)
+```
+
+```{r, message=FALSE, comment=NA}
+# Replacing all NA values for the Page Value in the original DF with 0
+
+df$PageValues[is.na(df$PageValues)] <- 0
+```
+
+The PageValue column consists of continuous numerical values that reflect the average value of the page visited by the customer prior to completing a transaction. There were 135 missing values originally. First, the missing values were removed, and then the field was further filtered to include only the remaining values if the Administrative, Informational, or ProductRelated fields were greater than 0. It was assumed that if none of these webpages were visited during a session, then there would be no record of the page value. The summary statistics were then looked at for the cleaned column. The mean is 5.97, however the first and third quartiles as well as the median are 0. This indicates that the vast majority of the webpages visited had no value. Given this and the fact that there are only 135 values, it was decided it would be best to impute the median/mode (i.e., 0) into the missing value cells.
+
+## Handling missing values (OperatingSystems)
+
+```{r, message=FALSE, comment=NA}
+df <- df[!is.na(df$OperatingSystems), ]
+```
+
+The OperatingSystems field had 123 null values. This is a categorical variable that has been coded to a numeric data type. However, in the confines of the data we are operating with, we are unsure what operating systems are represented. Therefore, we decided it would make the most sense to remove those missing value rows.
+
+## Transformation of the data
+
+```{r, message=FALSE, comment=NA}
+# Recoding the SpecialDay column to a categorical
+
+df$SpecialDayGroup <- cut(df$SpecialDay,  
+                          breaks = c(-Inf, .2, .4, .6, .8, 1, Inf),  
+                          labels = c("Far", "Moderately Close",  
+                                     "Close", "Very Close",  
+                                     "Too Close for on-time delivery", "Ideal Time"),  
+                          include.lowest = TRUE,  
+                          right = FALSE)
+```
+
+The numerical values in the SpecialDay field represent the closeness of the site visiting time to a specific special day (e.g. Mother’s Day, Valentine's Day, etc.) in which the sessions are more likely to be finalized with a transaction. They have little meaning as numerical values, so they were recoded to categorical values.
+
+```{r, message=FALSE, comment=NA}
+# Converting Month column to factor
+df$Month_factor <- as.factor(df$Month)
+```
+
+The Month column was converted into a factor type for comparison to categorical variables.
+
+```{r, message=FALSE, comment=NA}
+# Converting BounceRates and ExitRates into percentage values
+
+df_percent <- df
+df_percent$BounceRates <- df_percent$BounceRates * 100
+df_percent$ExitRates <- df_percent$ExitRates * 100
+```
+
+Given the other values in the data set representing whole units (e.g. single page view, \$1 value, 1 sec duration, etc.), it is easier to capture the data by converting the Bounce and Exit rates from decimals to percent values.
+
+# Cleaned dataframe 
+
+```{r, message=FALSE, comment=NA}
+data <- df_percent
+```
+
+# Data Analysis and Visualization ---------------------------
+
+```{r, message=FALSE, comment=NA}
+# Changing the levels of SpecialDayGroup for plotting purposes
+
+data$SpecialDayGroup <- factor(data$SpecialDayGroup,  
+                               levels = c("Far", "Moderately Close",  
+                                          "Close", "Very Close",  
+                                          "Too Close for on-time delivery", "Ideal Time"))
+
+# Changing the Levels of the Month_factor so that the Months are in order
+
+data$Month_factor <- factor(data$Month_factor, levels = c("Feb", "Mar",  
+                                                          "May", "June",  
+                                                          "Jul", "Aug",  
+                                                          "Sep", "Oct",  
+                                                          "Nov", "Dec"))
+# Data sets used for plotting
+
+# Removing 'Far' from Special day
+data_far_removed <- data[data$SpecialDayGroup != "Far", ] 
+# Keeping only True values for Revenue
+only_true <- data_far_removed[data_far_removed$Revenue != "False", ] 
+# Only True values for Revenue in the full data set
+only_true_full <- data[data$Revenue != "False", ]  
+```
+
+## Descriptive Statistics and Visualizations for Measures of Distribution and Centrality
+
+```{r, message=FALSE, comment=NA}
+# Descriptive Statistics of Numerical Data
+describe(data[, 1:9])
+```
+```{r, eval=FALSE}
+boxplot(data$Administrative,  
+        col = "forestgreen",  
+        varwidth = TRUE,  
+        main = "Admin Sites Visited During Session",  
+        xlab = "Sessions",  
+        ylab = "Sites Visited")
+
+boxplot(data$Administrative_Duration,  
+        col = "forestgreen",  
+        varwidth = TRUE,  
+        main = "Duration of Time Spent on Admin Site",  
+        xlab = "Sessions",  
+        ylab = "Duration")
+
+boxplot(data$Informational,  
+        col = "forestgreen",  
+        varwidth = TRUE,  
+        main = "Information Sites Visited During Session",  
+        xlab = "Sessions",  
+        ylab = "Sites Visited")
+
+boxplot(data$Informational_Duration,  
+        col = "forestgreen",  
+        varwidth = TRUE,  
+        main = "Duration of Time Spent on Information Site",  
+        xlab = "Sessions",  
+        ylab = "Duration")
+
+boxplot(data$ProductRelated,  
+        col = "forestgreen",  
+        varwidth = TRUE,  
+        main = "Product Sites Visited During Session",  
+        xlab = "Sessions",  
+        ylab = "Sites Visited")
+
+boxplot(data$ProductRelated_Duration,  
+        col = "forestgreen",  
+        varwidth = TRUE,  
+        main = "Duration of Time Spent on Product Site",  
+        xlab = "Sessions",  
+        ylab = "Duration")
+
+boxplot(data$BounceRates,  
+        col = "forestgreen",  
+        varwidth = TRUE,  
+        main = "Distribution of Bounce Rates",  
+        xlab = "Sessions",  
+        ylab = "Bounce Rates")
+
+boxplot(data$PageValues,  
+        col = "forestgreen",  
+        varwidth = TRUE,  
+        main = "Distribution of Page Values",  
+        xlab = "Sessions",  
+        ylab = "Page Values")
+```
+
+The data for the numerical values is highly skewed to the right due to the presence of several outliers and the majority of the data being concentrated around or at 0. We'll use an example of the boxplot distribution of Exit Rates to illustrate the distribution below. Exit Rates have one of the lowest skews, so the distributions of the other box plots are either similar or more extreme.
+
+```{r, comment = NA}
+boxplot(data$ExitRates,  
+        col = "forestgreen",  
+        varwidth = TRUE,  
+        main = "Distribution of Exit Rates",  
+        xlab = "Sessions",  
+        ylab = "Exit Rates")
+```
+\pagebreak
+
+## Correlation Plot of Numerical Data
+
+```{r, message=FALSE, comment=NA}
+correlation <- cor(data[, 1:9])
+
+corrplot(correlation, method = "circle", type = "lower")
+```
+
+The correlation plot illustrates a strong positive correlation between the Product Related and Product Related Duration fields as well as the Exit Rates and Bounce Rates, which we can visualize with scatter plots.
+
+\pagebreak
+
+## Scatter Plots of Highly Correlated Numerical Values
+
+```{r, message=FALSE, comment=NA}
+ggplot(data, aes(x = BounceRates, y = ExitRates)) +  
+  geom_point(color = "forestgreen", alpha = .8) +  
+  labs(title = "Bounce Rates Compared to Exit Rates",  
+       x = "Bounce Rates",  
+       y = "Exit Rates") +  
+  theme_minimal()
+
+ggplot(data, aes(x = ProductRelated, y = ProductRelated_Duration)) +  
+  geom_point(color = "forestgreen", alpha = .8) +  
+  labs(title = "Product Sites Visited Compared to Time Spent",  
+       x = "Number of Product Related Sites Visited During Session",  
+       y = "Duration of Time Spent") +  
+  theme_minimal()
+```
+
+As Revenue is our dependent variable, we first explored the relationship, if any, of Revenue with the other numerical values. Two of the more significant relationships can be visualized below. Exit Rates appear to have a strong negative relationship while Page Values appear to have a strong positive relationship.
+
+\pagebreak
+
+## Boxplots Comparing Revenue to Numerical Variables with Significance
+
+```{r, message=FALSE, comment=NA}
+ggplot(data, aes(x = Revenue, y = ExitRates, fill = Revenue)) +  
+  geom_boxplot() +  
+  labs(title = "Do Exit Rates Affect Purchase?",  
+       x = "Purchase Made?",  
+       y = "Exit Rates") +  
+  theme_minimal()
+
+
+ggplot(data, aes(x = Revenue, y = PageValues, fill = Revenue)) +  
+  geom_boxplot() +  
+  labs(title = "Do Higher Page Values Lead to More Purchases?",  
+       x = "Purchase Made?",  
+       y = "Page Value") +  
+  theme_minimal()
+```
+
+The following are bar charts to visualize the distribution of the categorical variables among their different levels.
+
+## Bar Charts of Categorical Data
+
+```{r, eval=FALSE}
+# SpecialDayGroup Bar Chart (Log scale and True scale) 
+# The log scale version was included to account for the heavy class imbalance of the  
+# 'Far' category.
+
+
+ggplot(data, aes(x = SpecialDayGroup, fill = SpecialDayGroup)) +  
+  geom_bar(alpha = .8) +  
+  labs(title = "Special Day",  
+       x = "On Time Delivery for Holiday?",  
+       y = "Number of Sessions (True Scale)",  
+       fill = "Proximity to Special Day") +  
+  theme_minimal() +  
+  scale_x_discrete(labels = function(x) str_wrap(x, width = 10)) +  
+  scale_fill_viridis_d(option = "magma")  
+
+ggplot(data, aes(x = SpecialDayGroup, fill = SpecialDayGroup)) +  
+  geom_bar(alpha = .8) +  
+  scale_y_log10() +  
+  labs(title = "Special Day",  
+       x = "On Time Delivery for Holiday?",  
+       y = "Number of Sessions (log scale)",  
+       fill = "Proximity to Special Day") +  
+  theme_minimal() +  
+  scale_x_discrete(labels = function(x) str_wrap(x, width = 10)) +  
+  scale_fill_viridis_d(option = "magma")
+
+# Month of Session Chart
+
+ggplot(data, aes(x = Month_factor, fill = Month_factor)) +  
+  geom_bar(alpha = .8) +  
+  labs(title = "Month of Session",  
+       x = "Month",  
+       y = "Number of Sessions",  
+       fill = "Month") +  
+  theme_minimal() +  
+  scale_fill_viridis_d(option = "D")
+
+# Weekend Chart
+
+ggplot(data, aes(x = Weekend)) +  
+  geom_bar(fill = "forestgreen", alpha = .8) +  
+  labs(title = "Weekend Sessions",  
+       x = "Weekend?",  
+       y = "Number of Sessions") +  
+  theme_minimal()
+
+# Visitor Chart
+
+ggplot(data, aes(x = VisitorType)) +  
+  geom_bar(fill = "forestgreen", alpha = .8) +  
+  labs(title = "Returning Visitor or New?",  
+       x = "Type of Visitor",  
+       y = "Number of Sessions") +  
+  theme_minimal()
+
+#Revenue Chart
+
+ggplot(data, aes(x = Revenue)) +  
+  geom_bar(fill = "forestgreen", alpha = .8) +  
+  labs(title = "Was a Purchase Made This Session?",  
+       x = "Purchase",  
+       y = "Number of Sessions") +  
+  theme_minimal()
+```
+
+
+## Stacked Bar Charts and Heat Maps Comparing Revenue to Other Significant Predictors
+
+```{r, message=FALSE, comment=NA}
+#Proportions Table then Stacked Bar (Month ~ Revenue)
+
+contingency_table <- table(data$Month, data$Revenue)
+proportions <- prop.table(contingency_table, margin = 1)
+proportions
+
+
+ggplot(data, aes(x = Month_factor, fill = Revenue)) +  
+  geom_bar() +  
+  labs(title = "Purchase made by Month",  
+       x = "Month",  
+       y = "Frequency of Purchase",  
+       fill = "Purchase") +  
+  theme_minimal() +  
+  scale_fill_brewer(palette = "Paired")
+```
+
+November has the most significant relationship to Revenue compared to the other months. A proportional table was included to put the relationships into a better context. From the stacked bar chart, May appears to have the second most significant relationship, however, the proportional chart shows that October has the second highest likelihood of a purchase being made, despite May having a higher absolute number of purchases. This highlights a potential area of opportunity to convert more sessions to purchases during the month of May, or increase traffic during the month of October.
+
+```{r, message = FALSE, comment = NA}
+# Proportions Table then Stacked Bar with and without "Far" (SpecialDayGroup ~ Revenue)
+
+group_rev <- table(data$SpecialDayGroup, data$Revenue)
+group_rev_prop <- prop.table(group_rev, margin = 1)
+group_rev_prop
+
+
+ggplot(data, aes(x = SpecialDayGroup, fill = Revenue)) +  
+  geom_bar(width = .5) +  
+  labs(title = "Purchase Made in Relation to Special Day",  
+       x = "Proximity to Special Day",  
+       y = "Frequency of Purchase",  
+       fill = "Purchase") +  
+  theme_minimal() +  
+  scale_fill_brewer(palette = "Paired") +  
+  scale_x_discrete(labels = function(x) str_wrap(x, width = 10))
+
+ggplot(data_far_removed, aes(x = SpecialDayGroup, fill = Revenue)) +  
+  geom_bar(width = .5) +  
+  labs(title = "Purchase Made in Relation to Special Day",  
+       x = "Proximity to Special Day",  
+       y = "Frequency of Purchase",  
+       fill = "Purchase") +  
+  theme_minimal() +  
+  scale_fill_brewer(palette = "Paired") +  
+  scale_x_discrete(labels = function(x) str_wrap(x, width = 10))
+```
+
+Special day group shows a higher likelihood, both in an absolute and in a proportional sense, of purchases being made far away from any sort of special day. We included a graph with the 'Far' category removed to get a clearer sense of the relationship with the other categories.
+
+```{r, message = FALSE, comment = NA}
+# Heat map to compare whether returning visitor were more likely to make purchases in 
+# certain months than others
+
+heatmap_data <- only_true_full %>%
+  group_by(Month_factor, VisitorType, Revenue) %>%
+  summarise(Frequency = n(), groups = "drop")
+
+ggplot(heatmap_data, aes(x = Month_factor, y = VisitorType, fill = Frequency)) +  
+  geom_tile(alpha = .7) +  
+  scale_fill_viridis_c(option = "mako", direction = -1) +  
+  labs(title = "Are Return Visitors More Likely to Purchase During Certain Months?",  
+       x = "Month",  
+       y = "Type of Visitor",  
+       fill = "Frequency of Purchase") +  
+  scale_y_discrete(labels = c("Returning_Visitor" = "Returning Visitor",  
+                              "New_Visitor" = "New Visitor")) +  
+  theme_minimal()
+
+
+
+
+# Heatmap to show the correlation between Month and Special Day
+
+heatmap_data2 <- only_true_full %>%
+  group_by(Month_factor, SpecialDayGroup, Revenue) %>%
+  summarise(Frequency = n(), groups = "drop")
+
+ggplot(heatmap_data2, aes(x = Month_factor, y = SpecialDayGroup, fill = Frequency)) +  
+  geom_tile(alpha = .5) +  
+  labs(title = "Month and on Time Purchase",  
+       x = "Month",  
+       y = "How Close to Holiday?",  
+       fill = "Frequency of Purchase") +  
+  scale_fill_viridis_c(option = "mako", direction = -1) +  
+  scale_x_discrete(labels = function(x) str_wrap(x, width = 10)) +  
+  theme_minimal()
+
+# Drop 'Far' from data to zoom in on the two months where purchases were made close to 
+# the holiday
+
+heatmap_data3 <- only_true %>%
+  group_by(Month_factor, SpecialDayGroup, Revenue) %>%
+  summarise(Frequency = n(), groups = "drop")
+
+ggplot(heatmap_data3, aes(x = Month_factor, y = SpecialDayGroup, fill = Frequency)) +  
+  geom_tile(alpha = .5) +  
+  labs(title = "Month and on Time Purchase",  
+       x = "Month",  
+       y = "How Close to Holiday?",  
+       fill = "Frequency of Purchase") +  
+  scale_fill_viridis_c(option = "mako", direction = -1) +  
+  scale_x_discrete(labels = function(x) str_wrap(x, width = 10)) +  
+  theme_minimal()
+```
+
+
+# Data Analytics ---------------------------
+
+```{r}
+# Recode Month and VisitorType to individual columns
+data <- data %>%
+  mutate(MonthFeb = ifelse(Month == "Feb", TRUE, FALSE),
+         MonthMar = ifelse(Month == "Mar", TRUE, FALSE),
+         MonthMay = ifelse(Month == "May", TRUE, FALSE),
+         MonthJune = ifelse(Month == "June", TRUE, FALSE),
+         MonthJul = ifelse(Month == "Jul", TRUE, FALSE),
+         MonthSep = ifelse(Month == "Sep", TRUE, FALSE),
+         MonthOct = ifelse(Month == "Oct", TRUE, FALSE),
+         MonthNov = ifelse(Month == "Nov", TRUE, FALSE),
+         MonthDec = ifelse(Month == "Dec", TRUE, FALSE))
+data <- data %>%
+  mutate(ReturningVisitor = ifelse(VisitorType == "Returning_Visitor", TRUE, FALSE))
+data$MonthFeb <- as.integer(data$MonthFeb)
+data$MonthMar <- as.integer(data$MonthMar)
+data$MonthMay <- as.integer(data$MonthMay)
+data$MonthJune <- as.integer(data$MonthJune)
+data$MonthJul <- as.integer(data$MonthJul)
+data$MonthSep <- as.integer(data$MonthSep)
+data$MonthOct <- as.integer(data$MonthOct)
+data$MonthNov <- as.integer(data$MonthNov)
+data$MonthDec <- as.integer(data$MonthDec)
+data$ReturningVisitor <- as.integer(data$ReturningVisitor)
+data$ProductRelated_Duration <- scale(data$ProductRelated_Duration)
+data$ExitRates <- scale(data$ExitRates)
+data$PageValues <- scale(data$PageValues)
+```
+
+## Final Logistic Regression Model
+
+- Most significant columns: ProductRelated_Duration, ExitRates, PageValues, Month, VisitorType
+- Most significant predictor variables: ProductRelated_Duration, ExitRates, PageValues, MonthDec, MonthFeb, MonthMar, MonthMay, MonthNov, Returning_Visitor
+- Accuracy: 0.8917
+- Pseudo R-Squared Value: 0.3160
+- VIF for Multicollinearity: All < 5, therefore no multicollinearity is present
+- Confusion Matrix: Correct Classified as False = 1904; Correct Classified as True = 212; Incorrect Classified as False = 146; Incorrect Classified as True = 111
+- Proportion of False in Train data: 8183/9713 = 0.8425
+- Proportion of False in Test data: 2015/2373 = 0.8491
+- PR-Curve AUC: 0.6429
+- ROC AUC: 0.9014
+- Precision Score: 0.6563
+- Recall Score: 0.5922
+- F1 Score: 0.6226
+- Generalized Regression Formula:
+- Revenue = -1.83 + 0.20(ProductRelated_Duration) - 0.84(ExitRates) + 1.54(PageValues) -  
+1.68(MonthFeb) - 0.46(MonthMar) - 0.59(MonthMay) + 0.60(MonthNov) - 0.54(MonthDec) - 0.24(ReturningVisitor)
+
+```{r, message=FALSE, comment=NA}
+
+# Set Seed
+set.seed(123)
+
+# Create Train and Test data sets
+sample <- sample(c(TRUE, FALSE), nrow(data), replace = TRUE, prob = c(0.8, 0.2))
+train <- data[sample, ]
+test <- data[!sample, ]
+
+# Logistic Regression Model
+model <- glm(Revenue ~ ProductRelated_Duration + ExitRates + PageValues +  
+                       MonthFeb + MonthMar + MonthMay +  
+                       MonthNov + MonthDec + ReturningVisitor,  
+            family = "binomial",  
+            data = train)
+summary(model)
+
+# Predicted results and Accuracy
+predicted <- predict(model, test, type = "response")
+predicted_results <- ifelse(predicted > 0.28, 1, 0)
+
+misClasificError <- mean(predicted_results != test$Revenue)
+print(paste("Accuracy", 1-misClasificError))
+
+# Calculation of pseudo R-Squared Value
+# pscl comes from library(pscl)
+pscl::pR2(model)["McFadden"]
+
+# Check the predictor variables for multicollinearity
+car::vif(model)
+
+# Confusion Matrix to check false positive and false negatives
+conf_matrix <- table(Predicted = predicted_results, Actual = test$Revenue)
+cat(sprintf("Confusion Matrix:\n"))
+conf_matrix
+
+# Tables to count the observed True/False in the Train and Test sets
+cat(sprintf("Table Count for True/False in Train Dataset:"))
+table(train$Revenue)
+cat(sprintf("\nTable Count for True/False in Test Dataset:"))
+table(test$Revenue)
+
+# Receiver Operating Characteristic Curve
+# roc() comes from library(pROC)
+roc_curve <- roc(test$Revenue, predicted)
+plot(roc_curve)
+auc_value <- auc(roc_curve)
+print(auc_value)
+
+# Precision-Recall Curve
+# pr.curve() comes from library(PRROC)
+pr_curve <- pr.curve(scores.class0 = predicted[test$Revenue == 1],
+                     scores.class1 = predicted[test$Revenue == 0],
+                     curve = TRUE)
+
+plot(pr_curve)
+
+precision <- conf_matrix[2, 2] / sum(conf_matrix[2, ])
+recall <- conf_matrix[2, 2] / sum(conf_matrix[, 2])
+print(paste("Precision Score:", precision))
+print(paste("Recall Score:", recall))
+
+f1_score <- 2 * ((precision * recall) / (precision + recall))
+print(paste("F1 Score:", f1_score))
+```
+\pagebreak
+\center __References__ \center
+
+\setlength{\parindent}{-0.5in}
+\setlength{\leftskip}{0.5in}
+\setlength{\parskip}{8pt}
+\noindent
+
+Encord Blog. (2023, July 18) F1 Score in Machine Learning. Encord. https://encord.com/blog/f1-score-in-machine-learning/#:~:text=The%20F1%20score%20ranges%20between  %200%20and%201%2C,can%20concurrently%20attain%20high%20precision%20and%20high%20recall. 
+
+Evidently AI. (n.d.) How to explain the ROC curve and ROC AUC score. Evidently AI. https://www.evidentlyai.com/classification-metrics/explain-roc-curve 
+
+One-Off Coder. (2024, Apr. 03). Pseudo r-squared for logistic regression. Data Science Topics. https://datascience.oneoffcoder.com/psuedo-r-squared-logistic-regression.html 
+
+Shah, C. (2020). Hands-on Introduction to Data Science. Cambridge University Press. https://doi.org/10.1017/9781108560412 
+
